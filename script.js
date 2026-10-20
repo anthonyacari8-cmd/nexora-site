@@ -234,3 +234,316 @@ function bind() {
 }
 
 document.addEventListener("DOMContentLoaded",async()=>{bind();authMode("login");if(!SUPABASE_URL.startsWith("https://")||SUPABASE_ANON_KEY.startsWith("COLE_"))return toast("Configure URL e chave anon/public no script.js.",true);db=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);db.auth.onAuthStateChange((event,session)=>{if(!session){user=profile=null;$("#app").classList.add("hidden");$("#auth").classList.remove("hidden")}else if(!user){user=session.user;setTimeout(()=>restore(),0)}});try{await restore()}catch(e){toast(err(e),true)}});
+
+
+/* =========================================================
+   NEXORA — PERFIS, AUTORIA DAS FOTOS E GERENCIAMENTO DE GRUPOS
+   Extensão integrada à versão atual do aplicativo.
+   ========================================================= */
+
+function avatarMarkup(name, url, className = "avatar") {
+  const fallback = esc(initials(name || "N"));
+  return url
+    ? `<div class="${className}"><img src="${esc(url)}" alt="Foto de ${esc(name || "usuário")}" loading="lazy"></div>`
+    : `<div class="${className}">${fallback}</div>`;
+}
+
+async function signedAvatar(path) {
+  if (!path || !db) return "";
+  try {
+    const { data, error } = await db.storage.from(BUCKET).createSignedUrl(path, 3600);
+    if (error) return "";
+    return data?.signedUrl || "";
+  } catch {
+    return "";
+  }
+}
+
+async function paintAvatar(el, name, path, className) {
+  if (!el) return;
+  const url = await signedAvatar(path);
+  if (url) {
+    el.innerHTML = `<img src="${esc(url)}" alt="Foto de perfil de ${esc(name || "usuário")}" loading="lazy">`;
+    el.classList.add("has-avatar-image");
+  } else {
+    el.textContent = initials(name || "N");
+    el.classList.remove("has-avatar-image");
+  }
+}
+
+async function refreshCurrentAvatars() {
+  if (!profile || !user) return;
+  const name = profile.display_name || user.email.split("@")[0];
+  await Promise.all([
+    paintAvatar($("#avatar"), name, profile.avatar_path, "avatar"),
+    paintAvatar($("#sidebarAvatar"), name, profile.avatar_path, "avatar"),
+    paintAvatar($("#railAvatar"), name, profile.avatar_path, "rail-user-avatar")
+  ]);
+}
+
+/* Busca também o caminho da foto de perfil dos amigos/membros. */
+profiles = async function(ids) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+  if (!uniqueIds.length) return [];
+  const { data, error } = await db
+    .from("profiles")
+    .select("id,display_name,friend_code,avatar_path")
+    .in("id", uniqueIds);
+  if (error) throw error;
+  const rows = data || [];
+  await Promise.all(rows.map(async p => { p.avatar_url = await signedAvatar(p.avatar_path); }));
+  return rows;
+};
+
+/* Mostra a foto de perfil na lista de amigos e nos pedidos recebidos. */
+channelpersonRow = function(p, extra = "") {
+  const avatar = p.avatar_url
+    ? `<div class="avatar"><img src="${esc(p.avatar_url)}" alt="Foto de ${esc(p.display_name || "usuário")}" loading="lazy"></div>`
+    : `<div class="avatar">${esc(initials(p.display_name || "N"))}</div>`;
+  return `<div class="person">${avatar}<div class="person-info"><strong>${esc(p.display_name || "Usuário")}</strong><small>${esc(p.friend_code || "")}</small></div>${extra}</div>`;
+};
+
+/* Atualiza os avatares depois que a função original prepara a tela. */
+const nexoraOriginalShowApp = showApp;
+showApp = async function(p) {
+  await nexoraOriginalShowApp(p);
+  profile = p;
+  await refreshCurrentAvatars();
+};
+
+/* Galeria com autoria opcional. Em grupos, mostra quem enviou cada imagem. */
+gallery = async function(el, photos, showAuthor = false) {
+  if (!el) return;
+  el.innerHTML = "";
+  const list = photos || [];
+  let authorById = new Map();
+
+  if (showAuthor && list.length) {
+    try {
+      const owners = await profiles([...new Set(list.map(p => p.owner_id).filter(Boolean))]);
+      authorById = new Map(owners.map(p => [p.id, p]));
+    } catch (e) {
+      console.error("Não foi possível carregar os autores das fotos:", e);
+    }
+  }
+
+  for (const p of list) {
+    try {
+      const { data, error } = await db.storage.from(BUCKET).createSignedUrl(p.storage_path, 3600);
+      if (error) throw error;
+
+      const item = document.createElement("div");
+      item.className = "photo-item";
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "photo";
+      button.innerHTML = `<img src="${esc(data.signedUrl)}" alt="${esc(p.file_name || "Foto")}" loading="lazy"><span>${esc(p.file_name || "Foto")}</span>`;
+      button.onclick = () => {
+        $("#viewerImg").src = data.signedUrl;
+        $("#viewerText").textContent = p.file_name || "Foto";
+        $("#viewer").showModal();
+      };
+      item.append(button);
+
+      if (showAuthor) {
+        const author = authorById.get(p.owner_id);
+        const name = author?.display_name || "Membro do grupo";
+        const meta = document.createElement("div");
+        meta.className = "photo-author";
+        meta.innerHTML = `${author?.avatar_url
+          ? `<img class="photo-author-avatar" src="${esc(author.avatar_url)}" alt="" loading="lazy">`
+          : `<span class="photo-author-avatar photo-author-initial">${esc(initials(name))}</span>`}
+          <span class="photo-author-name">${esc(name)}</span>`;
+        item.append(meta);
+      }
+
+      el.append(item);
+    } catch (e) {
+      console.error("Não foi possível carregar uma foto:", e);
+    }
+  }
+};
+
+/* Tela do grupo com autoria das fotos e ações exclusivas do criador. */
+showGroup = async function(g) {
+  const { data: mem, error: memberError } = await db
+    .from("group_members").select("user_id").eq("group_id", g.id);
+  if (memberError) throw memberError;
+
+  const ps = await profiles((mem || []).map(x => x.user_id));
+  const { data: photos, error: photoError } = await db
+    .from("photos").select("*").eq("group_id", g.id)
+    .order("created_at", { ascending: false });
+  if (photoError) throw photoError;
+
+  const isCreator = g.created_by === user.id;
+  $("#groupDetail").innerHTML = `
+    <div class="group-detail-heading">
+      <div>
+        <h3>${esc(g.name)}</h3>
+        <p class="muted">${ps.length} membro(s): ${ps.map(p => esc(p.display_name)).join(", ")}</p>
+      </div>
+      ${isCreator ? `<div class="group-actions">
+        <button class="secondary" type="button" data-edit-group="${esc(g.id)}">Editar</button>
+        <button class="danger-button" type="button" data-delete-group="${esc(g.id)}">Excluir</button>
+      </div>` : ""}
+    </div>
+    <label class="primary upload">＋ Enviar fotos
+      <input id="groupInput" type="file" accept="image/*" multiple hidden>
+    </label>
+    <div id="groupGallery" class="gallery" style="margin-top:15px"></div>
+    ${photos?.length ? "" : '<p class="empty">Nenhuma foto no grupo ainda.</p>'}`;
+
+  await gallery($("#groupGallery"), photos || [], true);
+  const input = $("#groupInput");
+  if (input) input.onchange = e => {
+    const files = e.target.files;
+    upload(files, g.id);
+    e.target.value = "";
+  };
+};
+
+/* Foto de perfil: o arquivo fica na pasta do próprio usuário no bucket privado. */
+async function uploadProfileAvatar(file) {
+  if (!file || !user) return;
+  if (!file.type.startsWith("image/")) return toast("Escolha um arquivo de imagem.", true);
+  if (file.size > 5 * 1024 * 1024) return toast("A foto de perfil deve ter no máximo 5 MB.", true);
+
+  toast("Atualizando foto de perfil…");
+  const safeName = file.name.replace(/[^\w.-]/g, "_");
+  const path = `${user.id}/avatars/${crypto.randomUUID()}-${safeName}`;
+
+  try {
+    const { error: uploadError } = await db.storage.from(BUCKET).upload(path, file, {
+      contentType: file.type,
+      upsert: false
+    });
+    if (uploadError) throw uploadError;
+
+    const { data, error } = await db.from("profiles")
+      .update({ avatar_path: path })
+      .eq("id", user.id)
+      .select("*")
+      .single();
+
+    if (error) {
+      await db.storage.from(BUCKET).remove([path]);
+      throw error;
+    }
+
+    profile = data;
+    await refreshCurrentAvatars();
+    toast("Foto de perfil atualizada!");
+  } catch (e) {
+    toast("Não foi possível atualizar a foto: " + err(e), true);
+  }
+}
+
+let editingGroupId = null;
+
+async function saveGroupEdit(e) {
+  e.preventDefault();
+  if (!editingGroupId || !user) return;
+  const name = $("#editGroupName").value.trim();
+  if (name.length < 2) return toast("O nome precisa ter pelo menos 2 caracteres.", true);
+
+  try {
+    const { data, error } = await db.from("groups")
+      .update({ name })
+      .eq("id", editingGroupId)
+      .eq("created_by", user.id)
+      .select()
+      .single();
+    if (error) throw error;
+
+    activeGroup = data.id;
+    $("#editGroupDialog").close();
+    toast("Grupo atualizado!");
+    await loadGroups();
+  } catch (e) {
+    toast("Não foi possível editar o grupo. Confira as permissões do Supabase: " + err(e), true);
+  }
+}
+
+async function deleteGroup(groupId) {
+  if (!groupId || !user) return;
+  if (!confirm("Excluir este grupo? As fotos e a lista de membros deixarão de aparecer no grupo. Esta ação não pode ser desfeita.")) return;
+
+  try {
+    const { data: group, error: groupError } = await db.from("groups")
+      .select("id,created_by").eq("id", groupId).single();
+    if (groupError) throw groupError;
+    if (group.created_by !== user.id) return toast("Somente o criador pode excluir este grupo.", true);
+
+    const { data: photos, error: photosReadError } = await db.from("photos")
+      .select("id,storage_path,owner_id").eq("group_id", groupId);
+    if (photosReadError) throw photosReadError;
+
+    // Tenta remover do Storage apenas arquivos na pasta do próprio usuário.
+    const ownPaths = (photos || [])
+      .filter(p => p.owner_id === user.id && typeof p.storage_path === "string" && p.storage_path.startsWith(`${user.id}/`))
+      .map(p => p.storage_path);
+    if (ownPaths.length) {
+      const { error: storageError } = await db.storage.from(BUCKET).remove(ownPaths);
+      if (storageError) console.warn("Alguns arquivos não foram removidos do Storage:", storageError);
+    }
+
+    const { error: photosDeleteError } = await db.from("photos").delete().eq("group_id", groupId);
+    if (photosDeleteError) throw photosDeleteError;
+
+    const { error: membersDeleteError } = await db.from("group_members").delete().eq("group_id", groupId);
+    if (membersDeleteError) throw membersDeleteError;
+
+    const { error: deleteError } = await db.from("groups").delete()
+      .eq("id", groupId).eq("created_by", user.id);
+    if (deleteError) throw deleteError;
+
+    if (activeGroup === groupId) activeGroup = null;
+    toast("Grupo excluído.");
+    await loadGroups();
+    await dashboard();
+  } catch (e) {
+    toast("Não foi possível excluir o grupo. Confira as políticas do Supabase: " + err(e), true);
+  }
+}
+
+/* Liga os novos controles sem remover os eventos já existentes. */
+const nexoraOriginalBind = bind;
+bind = function() {
+  nexoraOriginalBind();
+
+  const avatarInput = $("#profileAvatarInput");
+  if (avatarInput) avatarInput.onchange = e => {
+    const file = e.target.files?.[0];
+    uploadProfileAvatar(file);
+    e.target.value = "";
+  };
+
+  const editDialog = $("#editGroupDialog");
+  const editForm = $("#editGroupForm");
+  if (editForm) editForm.onsubmit = saveGroupEdit;
+  const cancelEdit = $("#cancelEditGroup");
+  if (cancelEdit && editDialog) cancelEdit.onclick = () => editDialog.close();
+
+  const detail = $("#groupDetail");
+  if (detail) detail.addEventListener("click", event => {
+    const edit = event.target.closest("[data-edit-group]");
+    const remove = event.target.closest("[data-delete-group]");
+
+    if (edit) {
+      const groupId = edit.dataset.editGroup;
+      db.from("groups").select("id,name,created_by").eq("id", groupId).single()
+        .then(({ data, error }) => {
+          if (error) throw error;
+          if (!data || data.created_by !== user.id) return toast("Somente o criador pode editar este grupo.", true);
+          editingGroupId = data.id;
+          $("#editGroupName").value = data.name || "";
+          $("#editGroupDialog").showModal();
+        })
+        .catch(e => toast(err(e), true));
+    }
+
+    if (remove) deleteGroup(remove.dataset.deleteGroup);
+  });
+};
