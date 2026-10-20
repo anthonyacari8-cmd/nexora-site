@@ -310,6 +310,10 @@
         <div class="profile panel">
           <div class="profile-cover"></div>
           <div class="avatar profile-avatar" id="avatar">N</div>
+          <label class="primary upload avatar-upload" for="profileAvatarInput">
+            Alterar foto de perfil
+            <input id="profileAvatarInput" type="file" accept="image/*" hidden>
+          </label>
 
           <h2 id="profileName"></h2>
           <p id="profileEmail"></p>
@@ -346,6 +350,21 @@
           Cancelar
         </button>
         <button class="primary" type="submit">Criar grupo</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- MODAL PARA EDITAR GRUPO -->
+  <dialog id="editGroupDialog">
+    <form id="editGroupForm">
+      <h2>Editar grupo</h2>
+      <p class="muted">Altere o nome do grupo. Apenas o criador pode editar.</p>
+      <label for="editGroupName">Nome do grupo</label>
+      <input id="editGroupName" required minlength="2" maxlength="50"
+        placeholder="Nome do grupo">
+      <div class="dialog-actions">
+        <button id="cancelEditGroup" type="button" class="secondary">Cancelar</button>
+        <button class="primary" type="submit">Salvar alterações</button>
       </div>
     </form>
   </dialog>
